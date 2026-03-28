@@ -1,5 +1,36 @@
 import { createClient } from 'https://esm.sh/@insforge/sdk';
 
+// ─── Inline JWT: verifyJWT ──────────────────────────────────────────────────────
+
+function base64urlDecode(str: string): Uint8Array {
+  const padded = str.replace(/-/g, '+').replace(/_/g, '/');
+  const binStr = atob(padded);
+  return Uint8Array.from(binStr, (c) => c.charCodeAt(0));
+}
+
+function textEncode(str: string): Uint8Array {
+  return new TextEncoder().encode(str);
+}
+
+async function verifyJWT(token: string, secret: string) {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('Invalid JWT format');
+  const [header, body, sig] = parts;
+  const key = await crypto.subtle.importKey(
+    'raw', textEncode(secret),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'],
+  );
+  const valid = await crypto.subtle.verify(
+    'HMAC', key, base64urlDecode(sig), textEncode(`${header}.${body}`),
+  );
+  if (!valid) throw new Error('Invalid JWT signature');
+  const payload = JSON.parse(new TextDecoder().decode(base64urlDecode(body)));
+  if (payload.exp < Math.floor(Date.now() / 1000)) throw new Error('JWT expired');
+  return payload as { sub: string; workspace_id: string; slack_user_id: string };
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────────
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -56,19 +87,31 @@ export default async function(req: Request): Promise<Response> {
   }
 
   try {
-    const { workspace_id } = await req.json();
+    // Verify JWT and extract workspace_id from claims
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      return new Response(
+        JSON.stringify({ error: 'Missing Authorization header' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+    const token = authHeader.slice(7);
+    const jwtSecret = Deno.env.get('JWT_SECRET')!;
+    const claims = await verifyJWT(token, jwtSecret);
+    const workspaceId = claims.workspace_id;
+
     const admin = createAdminClient();
 
     const { data: workspace, error: wsError } = await admin.database
       .from('workspaces')
       .select('*')
-      .eq('id', workspace_id)
+      .eq('id', workspaceId)
       .single();
 
     if (wsError || !workspace) {
       return new Response(
         JSON.stringify({ error: 'Workspace not found' }),
-        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
       );
     }
 
@@ -86,7 +129,7 @@ export default async function(req: Request): Promise<Response> {
           topic: ch.topic?.value || null,
           member_count: ch.num_members || 0,
         },
-        { onConflict: 'workspace_id,slack_channel_id' }
+        { onConflict: 'workspace_id,slack_channel_id' },
       );
     }
 
@@ -96,7 +139,7 @@ export default async function(req: Request): Promise<Response> {
       .select('id, slack_channel_id')
       .eq('workspace_id', workspace.id);
     const channelMap = new Map(
-      (dbChannels ?? []).map((c: any) => [c.slack_channel_id, c.id])
+      (dbChannels ?? []).map((c: any) => [c.slack_channel_id, c.id]),
     );
 
     // Sync messages (incremental using last_synced_at watermark)
@@ -110,6 +153,12 @@ export default async function(req: Request): Promise<Response> {
       const channelUuid = channelMap.get(ch.id);
       if (!channelUuid) continue;
       try {
+        // Bot must join the channel before it can read history
+        try {
+          await slackFetch('conversations.join', botToken, { channel: ch.id });
+        } catch {
+          // Already a member or can't join — continue anyway
+        }
         const messages = await fetchHistory(botToken, ch.id, oldestTs);
         for (const msg of messages) {
           if (msg.subtype && msg.subtype !== 'thread_broadcast') continue;
@@ -129,7 +178,7 @@ export default async function(req: Request): Promise<Response> {
                 : 0,
               posted_at: new Date(parseFloat(msg.ts) * 1000).toISOString(),
             },
-            { onConflict: 'workspace_id,channel_id,slack_ts' }
+            { onConflict: 'workspace_id,channel_id,slack_ts' },
           );
           totalMessages++;
         }
@@ -159,13 +208,20 @@ export default async function(req: Request): Promise<Response> {
         channels_synced: channelsToSync.length,
         messages_synced: totalMessages,
       }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   } catch (err) {
     console.error('Sync error:', err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('Invalid') || msg.includes('expired') || msg.includes('Missing')) {
+      return new Response(
+        JSON.stringify({ error: msg }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
     return new Response(
-      JSON.stringify({ error: 'Sync failed', details: String(err) }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      JSON.stringify({ error: 'Sync failed', details: msg }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   }
 }

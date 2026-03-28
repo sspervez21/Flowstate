@@ -6,7 +6,7 @@ import {
   useCallback,
   type ReactNode,
 } from 'react';
-import { insforge } from '../insforge';
+import { apiFetch, getToken, setToken, clearToken } from '../lib/api';
 import type { User } from '../lib/types';
 
 interface AuthState {
@@ -14,18 +14,18 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: () => void;
-  logout: () => Promise<void>;
+  logout: () => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
 
-async function fetchUserProfile(userId: string): Promise<User | null> {
-  const { data } = await insforge.database
-    .from('users')
-    .select('*')
-    .eq('id', userId)
-    .single();
-  return data as User | null;
+function isTokenExpired(token: string): boolean {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return payload.exp < Math.floor(Date.now() / 1000);
+  } catch {
+    return true;
+  }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -37,30 +37,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     async function init() {
       try {
-        // Check for access token in URL hash (after OAuth redirect from our Edge Function)
+        // Check for access token in URL hash (after OAuth redirect)
         const hash = window.location.hash;
         if (hash.includes('access_token')) {
           const params = new URLSearchParams(hash.substring(1));
           const accessToken = params.get('access_token');
-
           if (accessToken) {
-            // Set the token on the HTTP client for authenticated requests
-            insforge.getHttpClient().setAuthToken(accessToken);
-
+            setToken(accessToken);
             // Clean up URL
             window.history.replaceState(null, '', window.location.pathname);
           }
         }
 
-        // Check if we have an authenticated user
-        const { data, error } = await insforge.auth.getCurrentUser();
-
-        if (!error && data?.user && !cancelled) {
-          const profile = await fetchUserProfile(data.user.id);
-          if (!cancelled) setUser(profile);
+        // Check if we have a valid token in localStorage
+        const token = getToken();
+        if (!token || isTokenExpired(token)) {
+          clearToken();
+          return;
         }
+
+        // Fetch user profile from Edge Function
+        const profile = await apiFetch<User>('get-me');
+        if (!cancelled) setUser(profile);
       } catch {
-        // No valid session
+        clearToken();
       } finally {
         if (!cancelled) setIsLoading(false);
       }
@@ -83,9 +83,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       `&redirect_uri=${encodeURIComponent(redirectUri)}`;
   }, []);
 
-  const logout = useCallback(async () => {
-    await insforge.auth.signOut();
-    insforge.getHttpClient().setAuthToken(null);
+  const logout = useCallback(() => {
+    clearToken();
     setUser(null);
   }, []);
 

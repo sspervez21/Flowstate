@@ -1,6 +1,43 @@
 import { createClient } from 'https://esm.sh/@insforge/sdk';
 
-// Use HTML redirect since the Edge Function runtime follows 302 headers internally
+// ─── Inline JWT: createJWT ─────────────────────────────────────────────────────
+
+function base64urlEncode(data: Uint8Array): string {
+  const binStr = Array.from(data, (b) => String.fromCharCode(b)).join('');
+  return btoa(binStr).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function textEncode(str: string): Uint8Array {
+  return new TextEncoder().encode(str);
+}
+
+async function getKey(secret: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    'raw',
+    textEncode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign', 'verify'],
+  );
+}
+
+async function createJWT(
+  payload: { sub: string; workspace_id: string; slack_user_id: string },
+  secret: string,
+  expiresInSeconds = 7 * 24 * 60 * 60,
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const fullPayload = { ...payload, iat: now, exp: now + expiresInSeconds };
+  const header = base64urlEncode(textEncode(JSON.stringify({ alg: 'HS256', typ: 'JWT' })));
+  const body = base64urlEncode(textEncode(JSON.stringify(fullPayload)));
+  const signingInput = `${header}.${body}`;
+  const key = await getKey(secret);
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, textEncode(signingInput)));
+  return `${signingInput}.${base64urlEncode(sig)}`;
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────────
+
 function htmlRedirect(url: string): Response {
   const html = `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=${url}"><script>window.location.href="${url}";</script></head><body>Redirecting...</body></html>`;
   return new Response(html, {
@@ -9,16 +46,7 @@ function htmlRedirect(url: string): Response {
   });
 }
 
-function createAdminClient() {
-  // Use ANON_KEY (JWT) for auth operations; API_KEY (ik_...) for database
-  return createClient({
-    baseUrl: Deno.env.get('INSFORGE_BASE_URL')!,
-    anonKey: Deno.env.get('ANON_KEY')!,
-  });
-}
-
 function createDbClient() {
-  // Use API_KEY for database operations that need to bypass RLS
   return createClient({
     baseUrl: Deno.env.get('INSFORGE_BASE_URL')!,
     anonKey: Deno.env.get('API_KEY')!,
@@ -55,61 +83,16 @@ async function fetchUserInfo(token: string, userId: string) {
   };
 }
 
-// Robust auth: try signIn, then signUp, then signIn again if "already exists"
-async function getOrCreateAuthUser(
-  authClient: ReturnType<typeof createClient>,
-  email: string,
-  password: string
-): Promise<{ userId: string; accessToken: string }> {
-  // Attempt 1: sign in
-  console.log('Attempting signIn for:', email);
-  const { data: signInData, error: signInError } =
-    await authClient.auth.signInWithPassword({ email, password });
-
-  if (!signInError && signInData?.accessToken) {
-    console.log('SignIn success');
-    return { userId: signInData.user.id, accessToken: signInData.accessToken };
-  }
-  console.log('SignIn failed:', signInError);
-
-  // Attempt 2: sign up
-  console.log('Attempting signUp for:', email);
-  const { data: signUpData, error: signUpError } =
-    await authClient.auth.signUp({ email, password });
-
-  if (!signUpError && signUpData?.accessToken) {
-    console.log('SignUp success');
-    return { userId: signUpData.user!.id, accessToken: signUpData.accessToken };
-  }
-  console.log('SignUp failed:', signUpError);
-
-  // Attempt 3: if "already exists", retry signIn
-  const errMsg = signUpError?.message || String(signUpError);
-  if (errMsg.toLowerCase().includes('already exists') || errMsg.toLowerCase().includes('duplicate')) {
-    console.log('User exists, retrying signIn...');
-    const { data: retryData, error: retryError } =
-      await authClient.auth.signInWithPassword({ email, password });
-
-    if (!retryError && retryData?.accessToken) {
-      console.log('Retry signIn success');
-      return { userId: retryData.user.id, accessToken: retryData.accessToken };
-    }
-    console.error('Retry signIn also failed:', retryError);
-    throw new Error(`Auth failed after retry: ${retryError?.message || 'unknown'}`);
-  }
-
-  throw signUpError || new Error('Auth failed');
-}
+// ─── Handler ────────────────────────────────────────────────────────────────────
 
 export default async function(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const code = url.searchParams.get('code');
   const error = url.searchParams.get('error');
   const frontendUrl = Deno.env.get('FRONTEND_URL') || 'http://localhost:5173';
-
-  // Build the redirect_uri that matches what the frontend sent to Slack
   const insforgeUrl = Deno.env.get('INSFORGE_BASE_URL')!;
   const redirectUri = `${insforgeUrl}/functions/slack-oauth-callback`;
+  const jwtSecret = Deno.env.get('JWT_SECRET')!;
 
   if (error) {
     return htmlRedirect(`${frontendUrl}/login?error=${error}`);
@@ -119,23 +102,23 @@ export default async function(req: Request): Promise<Response> {
   }
 
   try {
-    // Step 1: Exchange code for Slack tokens
+    // 1. Exchange code for Slack tokens
     console.log('Exchanging OAuth code with redirect_uri:', redirectUri);
     const oauthData = await exchangeCode(code, redirectUri);
     const { team, authed_user, access_token: botToken } = oauthData;
-    console.log('OAuth exchange success, team:', team.id, 'user:', authed_user.id);
+    console.log('OAuth success, team:', team.id, 'user:', authed_user.id);
 
-    // Step 2: Fetch Slack user info
+    // 2. Fetch Slack user profile
     const userInfo = await fetchUserInfo(botToken, authed_user.id);
     console.log('Fetched user info:', userInfo.displayName);
 
-    // Step 3: Upsert workspace (using API_KEY client for DB access)
+    // 3. Upsert workspace
     const db = createDbClient();
     const { data: workspace, error: wsError } = await db.database
       .from('workspaces')
       .upsert(
         { slack_team_id: team.id, team_name: team.name, bot_token: botToken },
-        { onConflict: 'slack_team_id' }
+        { onConflict: 'slack_team_id' },
       )
       .select('id')
       .single();
@@ -145,40 +128,46 @@ export default async function(req: Request): Promise<Response> {
     }
     console.log('Workspace upserted:', workspace!.id);
 
-    // Step 4: Create or sign in InsForge auth user (using ANON_KEY client for auth)
-    const authClient = createAdminClient();
-    const email = `${authed_user.id}@slack.local`;
-    const password = `slack_${team.id}_${authed_user.id}`;
-
-    const { userId: authUserId, accessToken } =
-      await getOrCreateAuthUser(authClient, email, password);
-
-    // Step 5: Upsert user profile (using API_KEY client for DB access)
-    const { error: userError } = await db.database
+    // 4. Upsert user (Postgres generates UUID via DEFAULT gen_random_uuid())
+    const { data: user, error: userError } = await db.database
       .from('users')
       .upsert(
         {
-          id: authUserId,
           workspace_id: workspace!.id,
           slack_user_id: authed_user.id,
           display_name: userInfo.displayName,
           avatar_url: userInfo.avatarUrl,
-          slack_token: authed_user.access_token,
+          slack_token: authed_user.access_token || '',
         },
-        { onConflict: 'workspace_id,slack_user_id' }
-      );
+        { onConflict: 'workspace_id,slack_user_id' },
+      )
+      .select('id')
+      .single();
     if (userError) {
       console.error('User upsert error:', JSON.stringify(userError));
       throw userError;
     }
-    console.log('User profile upserted');
+    console.log('User upserted:', user!.id);
 
-    const dest = `${frontendUrl}/feed#access_token=${accessToken}`;
-    console.log('Redirecting to frontend with token');
+    // 5. Sign JWT
+    const jwt = await createJWT(
+      {
+        sub: user!.id,
+        workspace_id: workspace!.id,
+        slack_user_id: authed_user.id,
+      },
+      jwtSecret,
+    );
+
+    // 6. Redirect to frontend with JWT in URL hash
+    const dest = `${frontendUrl}/feed#access_token=${jwt}`;
+    console.log('Redirecting to frontend with JWT');
     return htmlRedirect(dest);
   } catch (err) {
     console.error('OAuth callback error:', err);
     const msg = err instanceof Error ? err.message : String(err);
-    return htmlRedirect(`${frontendUrl}/login?error=auth_failed&detail=${encodeURIComponent(msg)}`);
+    return htmlRedirect(
+      `${frontendUrl}/login?error=auth_failed&detail=${encodeURIComponent(msg)}`,
+    );
   }
 }

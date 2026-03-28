@@ -1,24 +1,22 @@
 import { useAuth } from '../hooks/useAuth';
 import { useSyncStatus } from '../hooks/useSyncStatus';
-import { insforge } from '../insforge';
+import { apiFetch } from '../lib/api';
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 
-interface TopBarProps {
-  workspaceId?: string;
-}
-
-export function TopBar({ workspaceId }: TopBarProps) {
+export function TopBar() {
   const { user, logout } = useAuth();
-  const { data: syncStatus } = useSyncStatus(workspaceId);
+  const { data: syncStatus } = useSyncStatus();
   const [isSyncing, setIsSyncing] = useState(false);
+  const queryClient = useQueryClient();
 
   const handleSync = async () => {
-    if (!workspaceId || isSyncing) return;
+    if (isSyncing) return;
     setIsSyncing(true);
     try {
-      await insforge.functions.invoke('slack-sync', {
-        body: { workspace_id: workspaceId },
-      });
+      await apiFetch('slack-sync');
+      // Refetch all data after sync completes
+      await queryClient.invalidateQueries();
     } catch (err) {
       console.error('Sync failed:', err);
     } finally {

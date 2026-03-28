@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { useAuth } from '../hooks/useAuth';
 import { useFeed } from '../hooks/useFeed';
 import { useChannels } from '../hooks/useChannels';
 import { TopBar } from '../components/TopBar';
@@ -7,13 +6,12 @@ import { ChannelSidebar } from '../components/ChannelSidebar';
 import { FeedList } from '../components/FeedList';
 
 export function FeedPage() {
-  const { user } = useAuth();
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
 
   const {
     data: channelsData,
     isLoading: channelsLoading,
-  } = useChannels(user?.workspace_id);
+  } = useChannels();
 
   const {
     data: feedData,
@@ -23,12 +21,11 @@ export function FeedPage() {
     isLoading: feedLoading,
   } = useFeed({
     channelId: selectedChannelId ?? undefined,
-    userId: user?.id,
   });
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
-      <TopBar workspaceId={user?.workspace_id} />
+      <TopBar />
       <div className="flex flex-1 overflow-hidden">
         <ChannelSidebar
           channels={channelsData ?? []}
