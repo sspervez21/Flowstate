@@ -10,6 +10,15 @@ function htmlRedirect(url: string): Response {
 }
 
 function createAdminClient() {
+  // Use ANON_KEY (JWT) for auth operations; API_KEY (ik_...) for database
+  return createClient({
+    baseUrl: Deno.env.get('INSFORGE_BASE_URL')!,
+    anonKey: Deno.env.get('ANON_KEY')!,
+  });
+}
+
+function createDbClient() {
+  // Use API_KEY for database operations that need to bypass RLS
   return createClient({
     baseUrl: Deno.env.get('INSFORGE_BASE_URL')!,
     anonKey: Deno.env.get('API_KEY')!,
@@ -46,6 +55,52 @@ async function fetchUserInfo(token: string, userId: string) {
   };
 }
 
+// Robust auth: try signIn, then signUp, then signIn again if "already exists"
+async function getOrCreateAuthUser(
+  authClient: ReturnType<typeof createClient>,
+  email: string,
+  password: string
+): Promise<{ userId: string; accessToken: string }> {
+  // Attempt 1: sign in
+  console.log('Attempting signIn for:', email);
+  const { data: signInData, error: signInError } =
+    await authClient.auth.signInWithPassword({ email, password });
+
+  if (!signInError && signInData?.accessToken) {
+    console.log('SignIn success');
+    return { userId: signInData.user.id, accessToken: signInData.accessToken };
+  }
+  console.log('SignIn failed:', signInError);
+
+  // Attempt 2: sign up
+  console.log('Attempting signUp for:', email);
+  const { data: signUpData, error: signUpError } =
+    await authClient.auth.signUp({ email, password });
+
+  if (!signUpError && signUpData?.accessToken) {
+    console.log('SignUp success');
+    return { userId: signUpData.user!.id, accessToken: signUpData.accessToken };
+  }
+  console.log('SignUp failed:', signUpError);
+
+  // Attempt 3: if "already exists", retry signIn
+  const errMsg = signUpError?.message || String(signUpError);
+  if (errMsg.toLowerCase().includes('already exists') || errMsg.toLowerCase().includes('duplicate')) {
+    console.log('User exists, retrying signIn...');
+    const { data: retryData, error: retryError } =
+      await authClient.auth.signInWithPassword({ email, password });
+
+    if (!retryError && retryData?.accessToken) {
+      console.log('Retry signIn success');
+      return { userId: retryData.user.id, accessToken: retryData.accessToken };
+    }
+    console.error('Retry signIn also failed:', retryError);
+    throw new Error(`Auth failed after retry: ${retryError?.message || 'unknown'}`);
+  }
+
+  throw signUpError || new Error('Auth failed');
+}
+
 export default async function(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const code = url.searchParams.get('code');
@@ -74,10 +129,9 @@ export default async function(req: Request): Promise<Response> {
     const userInfo = await fetchUserInfo(botToken, authed_user.id);
     console.log('Fetched user info:', userInfo.displayName);
 
-    // Step 3: Create admin client and upsert workspace
-    const admin = createAdminClient();
-
-    const { data: workspace, error: wsError } = await admin.database
+    // Step 3: Upsert workspace (using API_KEY client for DB access)
+    const db = createDbClient();
+    const { data: workspace, error: wsError } = await db.database
       .from('workspaces')
       .upsert(
         { slack_team_id: team.id, team_name: team.name, bot_token: botToken },
@@ -91,34 +145,16 @@ export default async function(req: Request): Promise<Response> {
     }
     console.log('Workspace upserted:', workspace!.id);
 
-    // Step 4: Create or sign in InsForge auth user
+    // Step 4: Create or sign in InsForge auth user (using ANON_KEY client for auth)
+    const authClient = createAdminClient();
     const email = `${authed_user.id}@slack.local`;
     const password = `slack_${team.id}_${authed_user.id}`;
-    let authUserId: string;
-    let accessToken: string | null = null;
 
-    const { data: signInData, error: signInError } =
-      await admin.auth.signInWithPassword({ email, password });
+    const { userId: authUserId, accessToken } =
+      await getOrCreateAuthUser(authClient, email, password);
 
-    if (signInError) {
-      console.log('Sign in failed (new user), signing up...');
-      const { data: signUpData, error: signUpError } =
-        await admin.auth.signUp({ email, password });
-      if (signUpError) {
-        console.error('Sign up error:', JSON.stringify(signUpError));
-        throw signUpError;
-      }
-      authUserId = signUpData!.user!.id;
-      accessToken = signUpData!.accessToken;
-      console.log('Sign up success, user:', authUserId);
-    } else {
-      authUserId = signInData!.user.id;
-      accessToken = signInData!.accessToken;
-      console.log('Sign in success, user:', authUserId);
-    }
-
-    // Step 5: Upsert user profile
-    const { error: userError } = await admin.database
+    // Step 5: Upsert user profile (using API_KEY client for DB access)
+    const { error: userError } = await db.database
       .from('users')
       .upsert(
         {
@@ -137,12 +173,9 @@ export default async function(req: Request): Promise<Response> {
     }
     console.log('User profile upserted');
 
-    if (accessToken) {
-      const dest = `${frontendUrl}/feed#access_token=${accessToken}`;
-      console.log('Redirecting to frontend with token');
-      return htmlRedirect(dest);
-    }
-    return htmlRedirect(`${frontendUrl}/login?error=no_session`);
+    const dest = `${frontendUrl}/feed#access_token=${accessToken}`;
+    console.log('Redirecting to frontend with token');
+    return htmlRedirect(dest);
   } catch (err) {
     console.error('OAuth callback error:', err);
     const msg = err instanceof Error ? err.message : String(err);
