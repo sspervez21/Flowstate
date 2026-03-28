@@ -71,6 +71,22 @@ async function slackPost(method: string, token: string, body: Record<string, str
   return data;
 }
 
+async function fetchUsers(token: string): Promise<Map<string, string>> {
+  const userMap = new Map<string, string>();
+  let cursor: string | undefined;
+  do {
+    const params: Record<string, string> = { limit: '200' };
+    if (cursor) params.cursor = cursor;
+    const data = await slackFetch('users.list', token, params);
+    for (const u of (data.members as any[]) ?? []) {
+      const name = u.profile?.display_name || u.profile?.real_name || u.real_name || u.name || u.id;
+      userMap.set(u.id, name);
+    }
+    cursor = (data.response_metadata as any)?.next_cursor;
+  } while (cursor);
+  return userMap;
+}
+
 async function fetchChannels(token: string) {
   const channels: any[] = [];
   let cursor: string | undefined;
@@ -156,6 +172,9 @@ export default async function(req: Request): Promise<Response> {
       (dbChannels ?? []).map((c: any) => [c.slack_channel_id, c.id]),
     );
 
+    // Fetch workspace users for name resolution
+    const userNameMap = await fetchUsers(botToken);
+
     // Sync messages (incremental using last_synced_at watermark)
     const oldestTs = lastSyncedAt
       ? (new Date(lastSyncedAt).getTime() / 1000).toString()
@@ -183,7 +202,7 @@ export default async function(req: Request): Promise<Response> {
               channel_id: channelUuid,
               slack_ts: msg.ts,
               author_slack_id: msg.user || 'unknown',
-              author_name: msg.user || 'Unknown',
+              author_name: userNameMap.get(msg.user) || msg.user || 'Unknown',
               content: msg.text,
               thread_ts: msg.thread_ts !== msg.ts ? msg.thread_ts : null,
               reply_count: msg.reply_count || 0,
