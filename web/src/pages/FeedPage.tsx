@@ -10,6 +10,7 @@ import { ChannelSidebar } from '../components/ChannelSidebar';
 import { FeedList } from '../components/FeedList';
 import { DebugPanel } from '../components/DebugPanel';
 import { RulesPanel } from '../components/RulesPanel';
+import type { ScoringRunBanner } from '../lib/scoringUi';
 
 type Tab = 'feed' | 'debug' | 'rules';
 
@@ -22,6 +23,7 @@ export function FeedPage() {
   const [relevance, setRelevance] = useState(100); // 100 = show everything
   const [isSyncing, setIsSyncing] = useState(false);
   const [visibleChannelIds, setVisibleChannelIds] = useState<Set<string> | null>(null);
+  const [scoringRunBanner, setScoringRunBanner] = useState<ScoringRunBanner | null>(null);
 
   // Convert slider value (0-100) to threshold (0.95-0)
   const threshold = 0.95 * (100 - relevance) / 100;
@@ -76,13 +78,25 @@ export function FeedPage() {
     try {
       await apiFetch('slack-sync');
       await queryClient.invalidateQueries();
-      // Auto-score after sync
+      // Auto-score after sync — loop until all messages are scored
+      let totalScored = 0;
       try {
-        const result = await apiFetch<{ scored: number; total: number }>('score-messages');
-        console.log('[handleSync] Scoring result:', result);
-        await queryClient.invalidateQueries({ queryKey: ['feed'] });
+        while (true) {
+          const result = await apiFetch<{ scored: number; total: number; remaining?: number; message?: string }>(
+            'score-messages',
+          );
+          totalScored += result.scored;
+          await queryClient.invalidateQueries({ queryKey: ['feed'] });
+          if (!result.remaining || result.remaining <= 0) break;
+        }
+        if (totalScored > 0) {
+          setScoringRunBanner({ variant: 'success', text: `Scored ${totalScored} message(s).` });
+        } else {
+          setScoringRunBanner({ variant: 'success', text: 'Nothing new to score.' });
+        }
       } catch (scoreErr) {
-        console.error('[handleSync] Scoring failed:', scoreErr);
+        const text = scoreErr instanceof Error ? scoreErr.message : String(scoreErr);
+        setScoringRunBanner({ variant: 'error', text: `Scoring failed: ${text}` });
       }
     } catch (err) {
       console.error('Sync failed:', err);
@@ -179,7 +193,12 @@ export function FeedPage() {
             )}
 
             {activeTab === 'debug' && (
-              <DebugPanel pages={feedData?.pages ?? []} isScoring={scoreMessages.isPending} />
+              <DebugPanel
+                pages={feedData?.pages ?? []}
+                isScoring={scoreMessages.isPending}
+                scoringRunBanner={scoringRunBanner}
+                onDismissScoringBanner={() => setScoringRunBanner(null)}
+              />
             )}
 
             {activeTab === 'rules' && (

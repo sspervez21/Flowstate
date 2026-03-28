@@ -19,7 +19,12 @@ function useRuleMutation<T>(
       await qc.invalidateQueries({ queryKey: ['rules'] });
       // Auto-rescore: clear old scores and re-score with updated rules
       try {
-        await apiFetch('score-messages', { force: true });
+        // First call with force to clear old scores
+        let result = await apiFetch<{ scored: number; remaining?: number }>('score-messages', { force: true });
+        // Loop to score remaining batches
+        while (result.remaining && result.remaining > 0) {
+          result = await apiFetch<{ scored: number; remaining?: number }>('score-messages');
+        }
         qc.invalidateQueries({ queryKey: ['feed'] });
       } catch (err) {
         console.error('Auto-rescore failed:', err);

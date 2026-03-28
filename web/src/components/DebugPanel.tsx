@@ -1,9 +1,12 @@
 import { useState } from 'react';
 import type { Message } from '../lib/types';
+import type { ScoringRunBanner } from '../lib/scoringUi';
 
 interface DebugPanelProps {
   pages: Message[][];
   isScoring?: boolean;
+  scoringRunBanner?: ScoringRunBanner | null;
+  onDismissScoringBanner?: () => void;
 }
 
 const SIGNAL_LABELS: Record<string, string> = {
@@ -48,7 +51,12 @@ function formatDateTime(dateStr: string): string {
   });
 }
 
-export function DebugPanel({ pages, isScoring }: DebugPanelProps) {
+export function DebugPanel({
+  pages,
+  isScoring,
+  scoringRunBanner,
+  onDismissScoringBanner,
+}: DebugPanelProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const messages = pages.flat();
@@ -70,8 +78,33 @@ export function DebugPanel({ pages, isScoring }: DebugPanelProps) {
     );
   }
 
+  const bannerStyles =
+    scoringRunBanner?.variant === 'error'
+      ? 'bg-red-50 text-red-800 border-red-200'
+      : scoringRunBanner?.variant === 'warning'
+        ? 'bg-amber-50 text-amber-900 border-amber-200'
+        : 'bg-emerald-50 text-emerald-900 border-emerald-200';
+
   return (
     <div>
+      {scoringRunBanner && (
+        <div
+          className={`mx-5 mt-3 mb-1 px-3 py-2 rounded-md border text-sm flex gap-2 items-start ${bannerStyles}`}
+          role="status"
+        >
+          <p className="flex-1 min-w-0 whitespace-pre-wrap break-words">{scoringRunBanner.text}</p>
+          {onDismissScoringBanner && (
+            <button
+              type="button"
+              onClick={onDismissScoringBanner}
+              className="flex-shrink-0 text-xs opacity-70 hover:opacity-100 underline"
+            >
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Summary */}
       <div className="px-5 py-2 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
         <div className="text-xs text-gray-400">

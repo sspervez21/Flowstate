@@ -95,19 +95,21 @@ function buildSystemPrompt(
 
   return `You are a relevance scoring engine for Slack messages. You score how relevant each message is to a specific user.
 
-The user is "${userName}" (Slack ID: <@${slackUserId}>).
+The user is "${userName}" (Slack ID: ${slackUserId}).
 ${channelContext}
 ${rulesContext}
 
 Score each message from 0.0 (completely irrelevant) to 1.0 (must-see).
 
+IMPORTANT: @mentions in messages have been resolved to display names (e.g. "@${userName}"). Only the CURRENT USER's name matters for the "mention" signal. Messages that @mention OTHER people (not "${userName}") should NOT get a mention boost.
+
 Scoring criteria (in order of importance):
-1. DIRECT MENTION: Message contains <@${slackUserId}> or mentions "${userName}" → score 0.9-1.0
-2. ACTION ITEMS: Questions or tasks directed at someone, especially the user → score 0.7-0.9
+1. DIRECT MENTION: Message contains "@${userName}" or is clearly addressed to "${userName}" → score 0.9-1.0
+2. ACTION ITEMS: Questions or tasks directed specifically at "${userName}" → score 0.7-0.9
 3. CHANNEL ACTIVITY: Messages in channels the user is most active in → boost by 0.1-0.2
 4. HIGH ENGAGEMENT: Messages with many reactions/replies → boost by 0.05-0.15
 5. CONTENT RELEVANCE: Messages about topics similar to what the user discusses → boost by 0.1-0.2
-6. GENERAL CHATTER: Casual messages, greetings, off-topic → score 0.1-0.3
+6. GENERAL CHATTER: Casual messages, greetings, messages directed at other people → score 0.1-0.3
 
 For each message, return a JSON object with:
 - "id": the message ID (pass through exactly)
@@ -244,9 +246,8 @@ export default async function(req: Request): Promise<Response> {
     const scoredIds = new Set((scored ?? []).map((s: any) => s.message_id));
     console.log('[score] Already scored:', scoredIds.size);
 
-    const messagesToScore: MessageToScore[] = ((allMsgs ?? []) as any[])
+    const allUnscored: MessageToScore[] = ((allMsgs ?? []) as any[])
       .filter((m: any) => !scoredIds.has(m.id))
-      .slice(0, BATCH_SIZE)
       .map((m: any) => ({
         id: m.id,
         content: m.content,
@@ -259,8 +260,8 @@ export default async function(req: Request): Promise<Response> {
         posted_at: m.posted_at,
       }));
 
-    console.log('[score] Messages to score:', messagesToScore.length);
-    if (messagesToScore.length === 0) {
+    console.log('[score] Messages to score:', allUnscored.length);
+    if (allUnscored.length === 0) {
       return json({ scored: 0, total: 0, message: 'No unscored messages' });
     }
 
@@ -295,20 +296,21 @@ export default async function(req: Request): Promise<Response> {
       .eq('enabled', true);
     console.log('[score] User rules:', rules?.length ?? 0, 'Channel stats:', statsWithNames.length);
 
-    // 5. Call AI to score
+    // 5. Build system prompt once, then score in batches
     const systemPrompt = buildSystemPrompt(
       user.display_name,
       user.slack_user_id,
       statsWithNames,
       (rules ?? []) as any[],
     );
-    const userPrompt = buildUserPrompt(messagesToScore);
 
-    console.log(`[score] Calling AI for ${messagesToScore.length} messages...`);
+    // 5. Score one batch per invocation (frontend loops if needed)
+    const batch = allUnscored.slice(0, BATCH_SIZE);
+    const userPrompt = buildUserPrompt(batch);
+
+    console.log(`[score] Scoring ${batch.length} of ${allUnscored.length} unscored messages...`);
     const scores = await callAI(systemPrompt, userPrompt, baseUrl, apiKey);
-    console.log('[score] AI returned', scores.length, 'scores');
 
-    // 6. Write scores to DB
     let written = 0;
     for (const s of scores) {
       const { error: insertErr } = await db.database
@@ -329,8 +331,9 @@ export default async function(req: Request): Promise<Response> {
       }
     }
 
-    console.log(`[score] Done: ${written}/${messagesToScore.length} messages scored`);
-    return json({ scored: written, total: messagesToScore.length });
+    const remaining = allUnscored.length - batch.length;
+    console.log(`[score] Done: ${written}/${batch.length} scored, ${remaining} remaining`);
+    return json({ scored: written, total: batch.length, remaining });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[score] ERROR:', msg);
