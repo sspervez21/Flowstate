@@ -9,7 +9,7 @@ const corsHeaders = {
 function createAdminClient() {
   return createClient({
     baseUrl: Deno.env.get('INSFORGE_BASE_URL')!,
-    anonKey: Deno.env.get('INSFORGE_SERVICE_ROLE_KEY')!,
+    anonKey: Deno.env.get('API_KEY')!,
   });
 }
 

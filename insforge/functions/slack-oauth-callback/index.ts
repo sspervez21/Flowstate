@@ -1,13 +1,22 @@
 import { createClient } from 'https://esm.sh/@insforge/sdk';
 
-function createAdminClient() {
-  return createClient({
-    baseUrl: Deno.env.get('INSFORGE_BASE_URL')!,
-    anonKey: Deno.env.get('INSFORGE_SERVICE_ROLE_KEY')!,
+// Use HTML redirect since the Edge Function runtime follows 302 headers internally
+function htmlRedirect(url: string): Response {
+  const html = `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=${url}"><script>window.location.href="${url}";</script></head><body>Redirecting...</body></html>`;
+  return new Response(html, {
+    status: 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
   });
 }
 
-async function exchangeCode(code: string): Promise<any> {
+function createAdminClient() {
+  return createClient({
+    baseUrl: Deno.env.get('INSFORGE_BASE_URL')!,
+    anonKey: Deno.env.get('API_KEY')!,
+  });
+}
+
+async function exchangeCode(code: string, redirectUri: string): Promise<any> {
   const res = await fetch('https://slack.com/api/oauth.v2.access', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -15,6 +24,7 @@ async function exchangeCode(code: string): Promise<any> {
       client_id: Deno.env.get('SLACK_CLIENT_ID')!,
       client_secret: Deno.env.get('SLACK_CLIENT_SECRET')!,
       code,
+      redirect_uri: redirectUri,
     }),
   });
   const data = await res.json();
@@ -42,21 +52,31 @@ export default async function(req: Request): Promise<Response> {
   const error = url.searchParams.get('error');
   const frontendUrl = Deno.env.get('FRONTEND_URL') || 'http://localhost:5173';
 
+  // Build the redirect_uri that matches what the frontend sent to Slack
+  const insforgeUrl = Deno.env.get('INSFORGE_BASE_URL')!;
+  const redirectUri = `${insforgeUrl}/functions/slack-oauth-callback`;
+
   if (error) {
-    return Response.redirect(`${frontendUrl}/login?error=${error}`, 302);
+    return htmlRedirect(`${frontendUrl}/login?error=${error}`);
   }
   if (!code) {
     return new Response('Missing code parameter', { status: 400 });
   }
 
   try {
-    const oauthData = await exchangeCode(code);
+    // Step 1: Exchange code for Slack tokens
+    console.log('Exchanging OAuth code with redirect_uri:', redirectUri);
+    const oauthData = await exchangeCode(code, redirectUri);
     const { team, authed_user, access_token: botToken } = oauthData;
-    const userInfo = await fetchUserInfo(botToken, authed_user.id);
+    console.log('OAuth exchange success, team:', team.id, 'user:', authed_user.id);
 
+    // Step 2: Fetch Slack user info
+    const userInfo = await fetchUserInfo(botToken, authed_user.id);
+    console.log('Fetched user info:', userInfo.displayName);
+
+    // Step 3: Create admin client and upsert workspace
     const admin = createAdminClient();
 
-    // Upsert workspace
     const { data: workspace, error: wsError } = await admin.database
       .from('workspaces')
       .upsert(
@@ -65,9 +85,13 @@ export default async function(req: Request): Promise<Response> {
       )
       .select('id')
       .single();
-    if (wsError) throw wsError;
+    if (wsError) {
+      console.error('Workspace upsert error:', JSON.stringify(wsError));
+      throw wsError;
+    }
+    console.log('Workspace upserted:', workspace!.id);
 
-    // Create or sign in auth user
+    // Step 4: Create or sign in InsForge auth user
     const email = `${authed_user.id}@slack.local`;
     const password = `slack_${team.id}_${authed_user.id}`;
     let authUserId: string;
@@ -77,17 +101,23 @@ export default async function(req: Request): Promise<Response> {
       await admin.auth.signInWithPassword({ email, password });
 
     if (signInError) {
+      console.log('Sign in failed (new user), signing up...');
       const { data: signUpData, error: signUpError } =
         await admin.auth.signUp({ email, password });
-      if (signUpError) throw signUpError;
+      if (signUpError) {
+        console.error('Sign up error:', JSON.stringify(signUpError));
+        throw signUpError;
+      }
       authUserId = signUpData!.user!.id;
       accessToken = signUpData!.accessToken;
+      console.log('Sign up success, user:', authUserId);
     } else {
       authUserId = signInData!.user.id;
       accessToken = signInData!.accessToken;
+      console.log('Sign in success, user:', authUserId);
     }
 
-    // Upsert user profile
+    // Step 5: Upsert user profile
     const { error: userError } = await admin.database
       .from('users')
       .upsert(
@@ -101,16 +131,21 @@ export default async function(req: Request): Promise<Response> {
         },
         { onConflict: 'workspace_id,slack_user_id' }
       );
-    if (userError) throw userError;
+    if (userError) {
+      console.error('User upsert error:', JSON.stringify(userError));
+      throw userError;
+    }
+    console.log('User profile upserted');
 
     if (accessToken) {
-      const redirectUrl = new URL(`${frontendUrl}/feed`);
-      redirectUrl.hash = `access_token=${accessToken}`;
-      return Response.redirect(redirectUrl.toString(), 302);
+      const dest = `${frontendUrl}/feed#access_token=${accessToken}`;
+      console.log('Redirecting to frontend with token');
+      return htmlRedirect(dest);
     }
-    return Response.redirect(`${frontendUrl}/login?error=no_session`, 302);
+    return htmlRedirect(`${frontendUrl}/login?error=no_session`);
   } catch (err) {
     console.error('OAuth callback error:', err);
-    return Response.redirect(`${frontendUrl}/login?error=auth_failed`, 302);
+    const msg = err instanceof Error ? err.message : String(err);
+    return htmlRedirect(`${frontendUrl}/login?error=auth_failed&detail=${encodeURIComponent(msg)}`);
   }
 }
