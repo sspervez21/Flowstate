@@ -177,6 +177,15 @@ export default async function(req: Request): Promise<Response> {
     const baseUrl = Deno.env.get('INSFORGE_BASE_URL')!;
     const apiKey = Deno.env.get('API_KEY')!;
 
+    // Check for force rescore flag
+    let force = false;
+    try {
+      const body = await req.json();
+      if (body.force === true) force = true;
+    } catch {
+      // no body
+    }
+
     // 1. Get user info
     const { data: user } = await db.database
       .from('users')
@@ -184,6 +193,15 @@ export default async function(req: Request): Promise<Response> {
       .eq('id', claims.sub)
       .single();
     if (!user) return json({ error: 'User not found' }, 404);
+
+    // If force mode, delete existing scores so everything gets re-scored
+    if (force) {
+      await db.database
+        .from('relevance_scores')
+        .delete()
+        .eq('user_id', claims.sub);
+      console.log(`Force rescore: cleared existing scores for user ${claims.sub}`);
+    }
 
     // 2. Get unscored messages for this user
     const { data: unscoredMessages, error: msgError } = await db.database

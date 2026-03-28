@@ -173,7 +173,7 @@ export function FeedPage() {
             )}
 
             {activeTab === 'debug' && (
-              <DebugPanel pages={feedData?.pages ?? []} />
+              <DebugPanel pages={feedData?.pages ?? []} isScoring={scoreMessages.isPending} />
             )}
 
             {activeTab === 'rules' && (

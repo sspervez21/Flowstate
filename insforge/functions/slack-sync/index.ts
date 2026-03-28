@@ -87,6 +87,17 @@ async function fetchUsers(token: string): Promise<Map<string, string>> {
   return userMap;
 }
 
+function resolveSlackMarkup(text: string, userMap: Map<string, string>): string {
+  return text
+    // Replace <@USERID> with @DisplayName
+    .replace(/<@([A-Z0-9]+)>/g, (_, id) => `@${userMap.get(id) || id}`)
+    // Replace <#CHANNELID|channel-name> with #channel-name
+    .replace(/<#[A-Z0-9]+\|([^>]+)>/g, (_, name) => `#${name}`)
+    // Replace <URL|label> with label, and bare <URL> with URL
+    .replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, (_, _url, label) => label)
+    .replace(/<(https?:\/\/[^>]+)>/g, (_, url) => url);
+}
+
 async function fetchChannels(token: string) {
   const channels: any[] = [];
   let cursor: string | undefined;
@@ -203,7 +214,7 @@ export default async function(req: Request): Promise<Response> {
               slack_ts: msg.ts,
               author_slack_id: msg.user || 'unknown',
               author_name: userNameMap.get(msg.user) || msg.user || 'Unknown',
-              content: msg.text,
+              content: resolveSlackMarkup(msg.text, userNameMap),
               thread_ts: msg.thread_ts !== msg.ts ? msg.thread_ts : null,
               reply_count: msg.reply_count || 0,
               reaction_count: msg.reactions

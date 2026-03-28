@@ -9,29 +9,45 @@ export function useRules() {
   });
 }
 
-export function useCreateRule() {
+function useRuleMutation<T>(
+  mutationFn: (vars: T) => Promise<unknown>,
+) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (vars: { rule_type: string; config: Record<string, unknown> }) =>
-      apiFetch<UserRule>('update-rules', { action: 'create', ...vars }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['rules'] }),
+    mutationFn,
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['rules'] });
+      // Auto-rescore: clear old scores and re-score with updated rules
+      try {
+        await apiFetch('score-messages', { force: true });
+        qc.invalidateQueries({ queryKey: ['feed'] });
+      } catch (err) {
+        console.error('Auto-rescore failed:', err);
+      }
+    },
   });
+}
+
+export function useCreateRule() {
+  return useRuleMutation((vars: { rule_type: string; config: Record<string, unknown> }) =>
+    apiFetch<UserRule>('update-rules', { action: 'create', ...vars }),
+  );
+}
+
+export function useUpdateRule() {
+  return useRuleMutation((vars: { rule_id: string; config: Record<string, unknown> }) =>
+    apiFetch<UserRule>('update-rules', { action: 'update', ...vars }),
+  );
 }
 
 export function useToggleRule() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (vars: { rule_id: string; enabled: boolean }) =>
-      apiFetch<UserRule>('update-rules', { action: 'toggle', ...vars }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['rules'] }),
-  });
+  return useRuleMutation((vars: { rule_id: string; enabled: boolean }) =>
+    apiFetch<UserRule>('update-rules', { action: 'toggle', ...vars }),
+  );
 }
 
 export function useDeleteRule() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (rule_id: string) =>
-      apiFetch('update-rules', { action: 'delete', rule_id }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['rules'] }),
-  });
+  return useRuleMutation((rule_id: string) =>
+    apiFetch('update-rules', { action: 'delete', rule_id }),
+  );
 }

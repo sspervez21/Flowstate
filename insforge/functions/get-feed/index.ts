@@ -106,16 +106,16 @@ export default async function(req: Request): Promise<Response> {
     const messageIds = (data ?? []).map((m: any) => m.id);
 
     // Fetch relevance scores for these messages
-    let scoreMap = new Map<string, { score: number; signals: Record<string, number> }>();
+    let scoreMap = new Map<string, { score: number; signals: Record<string, number>; scored_at: string }>();
     if (messageIds.length > 0) {
       const { data: scores } = await db.database
         .from('relevance_scores')
-        .select('message_id, score, signals')
+        .select('message_id, score, signals, scored_at')
         .eq('user_id', claims.sub)
         .in('message_id', messageIds);
 
       for (const s of (scores ?? []) as any[]) {
-        scoreMap.set(s.message_id, { score: s.score, signals: s.signals });
+        scoreMap.set(s.message_id, { score: s.score, signals: s.signals, scored_at: s.scored_at });
       }
     }
 
@@ -129,6 +129,7 @@ export default async function(req: Request): Promise<Response> {
           channels: undefined,
           relevance_score: scoreData?.score ?? null,
           relevance_signals: scoreData?.signals ?? null,
+          relevance_scored_at: scoreData?.scored_at ?? null,
         };
       })
       .filter((msg: any) => {

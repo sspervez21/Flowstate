@@ -42,6 +42,7 @@ export interface Message {
   channel_name?: string;
   relevance_score?: number | null;
   relevance_signals?: Record<string, number> | null;
+  relevance_scored_at?: string | null;
 }
 
 export interface UserRule {

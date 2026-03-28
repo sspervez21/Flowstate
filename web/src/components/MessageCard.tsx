@@ -1,8 +1,43 @@
 import type { Message } from '../lib/types';
+import type { ReactNode } from 'react';
 
 function formatTime(dateStr: string): string {
   const d = new Date(dateStr);
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * Parse message text and highlight @mentions and #channels like Slack.
+ * Only matches @Name patterns where the name starts with an uppercase letter
+ * (resolved Slack mentions), not arbitrary @-words in regular text.
+ */
+function renderContent(text: string): ReactNode[] {
+  // Match @FirstName LastName (capitalized, 1-3 words) or #channel-name (lowercase)
+  const parts = text.split(/(@[A-Z][a-zA-Z]+(?: [A-Z][a-zA-Z]+){0,3}|#[a-z][\w-]*)/g);
+
+  return parts.map((part, i) => {
+    if (/^@[A-Z]/.test(part)) {
+      return (
+        <span
+          key={i}
+          className="bg-[#D1ECFF] text-[#1264A3] rounded px-0.5 font-medium cursor-default"
+        >
+          {part}
+        </span>
+      );
+    }
+    if (part.startsWith('#')) {
+      return (
+        <span
+          key={i}
+          className="text-[#1264A3] font-medium cursor-pointer hover:underline"
+        >
+          {part}
+        </span>
+      );
+    }
+    return part;
+  });
 }
 
 interface MessageCardProps {
@@ -30,7 +65,7 @@ export function MessageCard({ message }: MessageCardProps) {
           </span>
         </div>
         <p className="text-[15px] text-gray-800 whitespace-pre-wrap break-words leading-snug">
-          {message.content}
+          {renderContent(message.content)}
         </p>
         {(message.reply_count > 0 || message.reaction_count > 0) && (
           <div className="flex items-center gap-3 mt-1 text-xs text-gray-400">
