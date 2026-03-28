@@ -77,7 +77,13 @@ export function FeedPage() {
       await apiFetch('slack-sync');
       await queryClient.invalidateQueries();
       // Auto-score after sync
-      scoreMessages.mutate();
+      try {
+        const result = await apiFetch<{ scored: number; total: number }>('score-messages');
+        console.log('[handleSync] Scoring result:', result);
+        await queryClient.invalidateQueries({ queryKey: ['feed'] });
+      } catch (scoreErr) {
+        console.error('[handleSync] Scoring failed:', scoreErr);
+      }
     } catch (err) {
       console.error('Sync failed:', err);
     } finally {

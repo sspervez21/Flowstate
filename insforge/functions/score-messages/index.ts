@@ -134,45 +134,63 @@ async function callAI(
   baseUrl: string,
   apiKey: string,
 ): Promise<Array<{ id: string; score: number; signals: Record<string, number> }>> {
-  const res = await fetch(`${baseUrl}/api/ai/chat/completion`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: 'openai/gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: 0.1,
-      maxTokens: 4000,
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 55_000); // 55s timeout
+  try {
+    console.log('[score] Calling AI API...');
+    const res = await fetch(`${baseUrl}/api/ai/chat/completion`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.1,
+        max_tokens: 4000,
+      }),
+      signal: controller.signal,
+    });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`AI API error ${res.status}: ${errText}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`AI API error ${res.status}: ${errText}`);
+    }
+
+    const data = await res.json();
+    // InsForge AI returns { text: "..." } not OpenAI { choices: [...] }
+    const content = data.text || data.choices?.[0]?.message?.content || '';
+    console.log('[score] AI response received, content length:', content.length);
+
+    if (!content) {
+      throw new Error('AI returned empty content');
+    }
+
+    // Parse JSON from response (handle markdown code blocks)
+    const jsonStr = content.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    return JSON.parse(jsonStr);
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const data = await res.json();
-  const content = data.choices?.[0]?.message?.content || '';
-
-  // Parse JSON from response (handle markdown code blocks)
-  const jsonStr = content.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
-  return JSON.parse(jsonStr);
 }
 
 // ─── Handler ────────────────────────────────────────────────────────────────────
 
 export default async function(req: Request): Promise<Response> {
+  console.log('[score] Function invoked, method:', req.method);
+
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders });
   }
 
   try {
     const claims = await authenticate(req);
+    console.log('[score] Authenticated user:', claims.sub, 'workspace:', claims.workspace_id);
+
     const db = createDbClient();
     const baseUrl = Deno.env.get('INSFORGE_BASE_URL')!;
     const apiKey = Deno.env.get('API_KEY')!;
@@ -183,70 +201,53 @@ export default async function(req: Request): Promise<Response> {
       const body = await req.json();
       if (body.force === true) force = true;
     } catch {
-      // no body
+      // no body — normal for post-sync scoring
     }
+    console.log('[score] Force mode:', force);
 
     // 1. Get user info
-    const { data: user } = await db.database
+    const { data: user, error: userErr } = await db.database
       .from('users')
       .select('*')
       .eq('id', claims.sub)
       .single();
+    if (userErr) console.error('[score] User query error:', userErr);
     if (!user) return json({ error: 'User not found' }, 404);
+    console.log('[score] User found:', user.display_name);
 
     // If force mode, delete existing scores so everything gets re-scored
     if (force) {
-      await db.database
+      const { error: delErr } = await db.database
         .from('relevance_scores')
         .delete()
         .eq('user_id', claims.sub);
-      console.log(`Force rescore: cleared existing scores for user ${claims.sub}`);
+      if (delErr) console.error('[score] Delete scores error:', delErr);
+      console.log('[score] Force rescore: cleared existing scores');
     }
 
-    // 2. Get unscored messages for this user
-    const { data: unscoredMessages, error: msgError } = await db.database
+    // 2. Get unscored messages (manual approach — PostgREST doesn't support subqueries)
+    const { data: allMsgs, error: msgsErr } = await db.database
       .from('messages')
       .select('id, content, author_name, author_slack_id, channel_id, reply_count, reaction_count, posted_at, channels!inner(name)')
       .eq('workspace_id', claims.workspace_id)
-      .not('id', 'in', `(SELECT message_id FROM relevance_scores WHERE user_id = '${claims.sub}')`)
       .order('posted_at', { ascending: false })
-      .limit(BATCH_SIZE);
+      .limit(500);
+    if (msgsErr) console.error('[score] Messages query error:', msgsErr);
+    console.log('[score] Total messages fetched:', allMsgs?.length ?? 0);
 
-    // Fallback: if the subquery filter doesn't work, fetch and filter manually
-    let messagesToScore: MessageToScore[];
-    if (msgError || !unscoredMessages) {
-      console.log('Subquery filter failed, using manual approach:', msgError);
-      // Get all recent messages
-      const { data: allMsgs } = await db.database
-        .from('messages')
-        .select('id, content, author_name, author_slack_id, channel_id, reply_count, reaction_count, posted_at, channels!inner(name)')
-        .eq('workspace_id', claims.workspace_id)
-        .order('posted_at', { ascending: false })
-        .limit(100);
+    // Get already-scored message IDs
+    const { data: scored, error: scoredErr } = await db.database
+      .from('relevance_scores')
+      .select('message_id')
+      .eq('user_id', claims.sub);
+    if (scoredErr) console.error('[score] Scored query error:', scoredErr);
+    const scoredIds = new Set((scored ?? []).map((s: any) => s.message_id));
+    console.log('[score] Already scored:', scoredIds.size);
 
-      // Get already-scored message IDs
-      const { data: scored } = await db.database
-        .from('relevance_scores')
-        .select('message_id')
-        .eq('user_id', claims.sub);
-      const scoredIds = new Set((scored ?? []).map((s: any) => s.message_id));
-
-      messagesToScore = ((allMsgs ?? []) as any[])
-        .filter((m: any) => !scoredIds.has(m.id))
-        .slice(0, BATCH_SIZE)
-        .map((m: any) => ({
-          id: m.id,
-          content: m.content,
-          author_name: m.author_name,
-          author_slack_id: m.author_slack_id,
-          channel_name: m.channels?.name || 'unknown',
-          channel_id: m.channel_id,
-          reply_count: m.reply_count,
-          reaction_count: m.reaction_count,
-          posted_at: m.posted_at,
-        }));
-    } else {
-      messagesToScore = (unscoredMessages as any[]).map((m: any) => ({
+    const messagesToScore: MessageToScore[] = ((allMsgs ?? []) as any[])
+      .filter((m: any) => !scoredIds.has(m.id))
+      .slice(0, BATCH_SIZE)
+      .map((m: any) => ({
         id: m.id,
         content: m.content,
         author_name: m.author_name,
@@ -257,13 +258,13 @@ export default async function(req: Request): Promise<Response> {
         reaction_count: m.reaction_count,
         posted_at: m.posted_at,
       }));
-    }
 
+    console.log('[score] Messages to score:', messagesToScore.length);
     if (messagesToScore.length === 0) {
-      return json({ scored: 0, message: 'No unscored messages' });
+      return json({ scored: 0, total: 0, message: 'No unscored messages' });
     }
 
-    // 3. Get user channel stats
+    // 3. Get user channel stats (optional)
     const { data: channelStats } = await db.database
       .from('user_channel_stats')
       .select('channel_id, messages_sent, mentions_received')
@@ -271,7 +272,6 @@ export default async function(req: Request): Promise<Response> {
       .order('messages_sent', { ascending: false })
       .limit(10);
 
-    // Map channel IDs to names
     const channelIds = (channelStats ?? []).map((s: any) => s.channel_id);
     let statsWithNames: Array<{ channel_name: string; messages_sent: number; mentions_received: number }> = [];
     if (channelIds.length > 0) {
@@ -293,6 +293,7 @@ export default async function(req: Request): Promise<Response> {
       .select('rule_type, config')
       .eq('user_id', claims.sub)
       .eq('enabled', true);
+    console.log('[score] User rules:', rules?.length ?? 0, 'Channel stats:', statsWithNames.length);
 
     // 5. Call AI to score
     const systemPrompt = buildSystemPrompt(
@@ -303,8 +304,9 @@ export default async function(req: Request): Promise<Response> {
     );
     const userPrompt = buildUserPrompt(messagesToScore);
 
-    console.log(`Scoring ${messagesToScore.length} messages for user ${user.display_name}`);
+    console.log(`[score] Calling AI for ${messagesToScore.length} messages...`);
     const scores = await callAI(systemPrompt, userPrompt, baseUrl, apiKey);
+    console.log('[score] AI returned', scores.length, 'scores');
 
     // 6. Write scores to DB
     let written = 0;
@@ -321,20 +323,20 @@ export default async function(req: Request): Promise<Response> {
           { onConflict: 'message_id,user_id' },
         );
       if (insertErr) {
-        console.error(`Failed to write score for ${s.id}:`, insertErr);
+        console.error(`[score] Failed to write score for ${s.id}:`, insertErr);
       } else {
         written++;
       }
     }
 
-    console.log(`Scored ${written}/${messagesToScore.length} messages`);
+    console.log(`[score] Done: ${written}/${messagesToScore.length} messages scored`);
     return json({ scored: written, total: messagesToScore.length });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    console.error('[score] ERROR:', msg);
     if (msg.includes('Invalid') || msg.includes('expired') || msg.includes('Missing')) {
       return json({ error: msg }, 401);
     }
-    console.error('score-messages error:', err);
     return json({ error: msg }, 500);
   }
 }
