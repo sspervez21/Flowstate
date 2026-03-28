@@ -73,7 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(() => {
     const clientId = import.meta.env.VITE_SLACK_CLIENT_ID;
     const insforgeUrl = import.meta.env.VITE_INSFORGE_URL;
-    const redirectUri = `${insforgeUrl}/functions/v1/slack-oauth-callback`;
+    const redirectUri = `${insforgeUrl}/functions/slack-oauth-callback`;
     const scopes = 'channels:read,channels:history,users:read,reactions:read,team:read';
 
     window.location.href =
