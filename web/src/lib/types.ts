@@ -39,9 +39,17 @@ export interface Message {
   reaction_count: number;
   posted_at: string;
   synced_at: string;
-  // joined from channels table in feed queries
   channel_name?: string;
-  // joined from relevance_scores in Phase 2
-  score?: number;
-  signals?: Record<string, number>;
+  relevance_score?: number | null;
+  relevance_signals?: Record<string, number> | null;
+}
+
+export interface UserRule {
+  id: string;
+  user_id: string;
+  rule_type: string;
+  config: Record<string, unknown>;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }

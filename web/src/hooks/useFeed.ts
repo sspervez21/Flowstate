@@ -6,16 +6,18 @@ const PAGE_SIZE = 20;
 
 interface UseFeedOptions {
   channelId?: string;
+  threshold?: number;
 }
 
-export function useFeed({ channelId }: UseFeedOptions = {}) {
+export function useFeed({ channelId, threshold = 0 }: UseFeedOptions = {}) {
   return useInfiniteQuery<Message[]>({
-    queryKey: ['feed', channelId],
+    queryKey: ['feed', channelId, threshold],
     queryFn: async ({ pageParam = 0 }) => {
       return apiFetch<Message[]>('get-feed', {
         channel_id: channelId,
         offset: pageParam as number,
         limit: PAGE_SIZE,
+        threshold,
       });
     },
     initialPageParam: 0,

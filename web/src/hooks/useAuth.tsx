@@ -74,7 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const clientId = import.meta.env.VITE_SLACK_CLIENT_ID;
     const insforgeUrl = import.meta.env.VITE_INSFORGE_URL;
     const redirectUri = `${insforgeUrl}/functions/slack-oauth-callback`;
-    const scopes = 'channels:read,channels:history,users:read,reactions:read,team:read';
+    const scopes = 'channels:read,channels:history,channels:join,users:read,reactions:read,team:read';
 
     window.location.href =
       `https://slack.com/oauth/v2/authorize?client_id=${clientId}` +

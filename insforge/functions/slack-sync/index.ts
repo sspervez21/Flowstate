@@ -57,6 +57,20 @@ async function slackFetch(method: string, token: string, params?: Record<string,
   return data;
 }
 
+async function slackPost(method: string, token: string, body: Record<string, string>) {
+  const res = await fetch(`https://slack.com/api/${method}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(`Slack API ${method} failed: ${data.error}`);
+  return data;
+}
+
 async function fetchChannels(token: string) {
   const channels: any[] = [];
   let cursor: string | undefined;
@@ -153,9 +167,9 @@ export default async function(req: Request): Promise<Response> {
       const channelUuid = channelMap.get(ch.id);
       if (!channelUuid) continue;
       try {
-        // Bot must join the channel before it can read history
+        // Bot must join the channel before it can read history (requires POST)
         try {
-          await slackFetch('conversations.join', botToken, { channel: ch.id });
+          await slackPost('conversations.join', botToken, { channel: ch.id });
         } catch {
           // Already a member or can't join — continue anyway
         }

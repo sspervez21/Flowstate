@@ -31,8 +31,6 @@ async function verifyJWT(token: string, secret: string) {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
-const PAGE_SIZE = 20;
-
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -68,83 +66,22 @@ export default async function(req: Request): Promise<Response> {
 
   try {
     const claims = await authenticate(req);
-
-    let channelId: string | undefined;
-    let offset = 0;
-    let limit = PAGE_SIZE;
-    let threshold = 0; // 0 = show everything, 0.95 = only top 5%
-
-    try {
-      const body = await req.json();
-      channelId = body.channel_id;
-      if (typeof body.offset === 'number') offset = body.offset;
-      if (typeof body.limit === 'number') limit = Math.min(body.limit, 100);
-      if (typeof body.threshold === 'number') threshold = body.threshold;
-    } catch {
-      // No body or invalid JSON — use defaults
-    }
-
     const db = createDbClient();
 
-    // Fetch more messages than needed since we'll filter by threshold
-    const fetchLimit = threshold > 0 ? limit * 5 : limit;
+    const { data, error } = await db.database
+      .from('user_rules')
+      .select('*')
+      .eq('user_id', claims.sub)
+      .order('created_at', { ascending: true });
 
-    let query = db.database
-      .from('messages')
-      .select('*, channels!inner(name)')
-      .eq('workspace_id', claims.workspace_id)
-      .order('posted_at', { ascending: false })
-      .range(offset, offset + fetchLimit - 1);
-
-    if (channelId) {
-      query = query.eq('channel_id', channelId);
-    }
-
-    const { data, error } = await query;
     if (error) throw error;
-
-    const messageIds = (data ?? []).map((m: any) => m.id);
-
-    // Fetch relevance scores for these messages
-    let scoreMap = new Map<string, { score: number; signals: Record<string, number> }>();
-    if (messageIds.length > 0) {
-      const { data: scores } = await db.database
-        .from('relevance_scores')
-        .select('message_id, score, signals')
-        .eq('user_id', claims.sub)
-        .in('message_id', messageIds);
-
-      for (const s of (scores ?? []) as any[]) {
-        scoreMap.set(s.message_id, { score: s.score, signals: s.signals });
-      }
-    }
-
-    // Build messages with scores, filter by threshold
-    const messages = (data ?? [])
-      .map((msg: any) => {
-        const scoreData = scoreMap.get(msg.id);
-        return {
-          ...msg,
-          channel_name: msg.channels?.name,
-          channels: undefined,
-          relevance_score: scoreData?.score ?? null,
-          relevance_signals: scoreData?.signals ?? null,
-        };
-      })
-      .filter((msg: any) => {
-        if (threshold <= 0) return true; // no filtering
-        if (msg.relevance_score === null) return true; // unscored messages always shown
-        return msg.relevance_score >= threshold;
-      })
-      .slice(0, limit);
-
-    return json(messages);
+    return json(data ?? []);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('Invalid') || msg.includes('expired') || msg.includes('Missing')) {
       return json({ error: msg }, 401);
     }
-    console.error('get-feed error:', err);
+    console.error('get-rules error:', err);
     return json({ error: msg }, 500);
   }
 }
