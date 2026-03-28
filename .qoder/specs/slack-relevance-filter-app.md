@@ -222,8 +222,77 @@ else: score = 0.50*semantic + 0.25*recency + 0.15*engagement + 0.10*channel_boos
 
 ## Build Phases (Incremental)
 
+### Phase 0: Prerequisites (Manual Setup — YOU do this before coding)
+
+These are manual steps you complete in the Slack and InsForge dashboards. Code can't work without them.
+
+#### Step 1: Create InsForge Project
+- Sign up / log in to InsForge cloud
+- Create a new project
+- Note down: **Project URL** and **Anon Key** (from project settings)
+- Note down: **Service Role Key** (for Edge Functions — keep secret)
+- **When needed**: Before anything else. All code depends on these credentials.
+
+#### Step 2: Create Slack App
+- Go to https://api.slack.com/apps → "Create New App" → "From scratch"
+- Name it (e.g., "Flowstate") and select your workspace
+- Note down: **Client ID**, **Client Secret**, **Signing Secret** (from "Basic Information")
+- **When needed**: Before Phase 1 (OAuth won't work without it)
+
+#### Step 3: Configure Slack OAuth Scopes
+- In your Slack app dashboard → "OAuth & Permissions"
+- Add **Bot Token Scopes**:
+  - `channels:read` — list public channels
+  - `channels:history` — read messages from public channels
+  - `users:read` — fetch user profiles (display names, avatars)
+  - `reactions:read` — read emoji reactions on messages
+  - `team:read` — get workspace info
+- Add **User Token Scopes**:
+  - `channels:read` — list channels the user is in
+  - `channels:history` — read messages on behalf of the user
+- **When needed**: Before Phase 1. These scopes are requested during the OAuth flow.
+
+#### Step 4: Set Slack OAuth Redirect URL
+- In "OAuth & Permissions" → "Redirect URLs" → Add:
+  - `{YOUR_INSFORGE_PROJECT_URL}/functions/v1/slack-oauth-callback`
+- This is the Edge Function URL that handles the OAuth callback
+- **When needed**: Before Phase 1. Slack will reject the OAuth flow without a matching redirect URL.
+
+#### Step 5: Configure Environment Variables
+- **Frontend `.env`** (create `web/.env`):
+  ```
+  VITE_INSFORGE_URL=https://your-project.insforge.app
+  VITE_INSFORGE_ANON_KEY=your-anon-key
+  VITE_SLACK_CLIENT_ID=your-slack-client-id
+  ```
+- **InsForge Edge Function Secrets** (set via InsForge dashboard or CLI):
+  ```
+  INSFORGE_SERVICE_ROLE_KEY=your-service-role-key
+  SLACK_CLIENT_ID=your-slack-client-id
+  SLACK_CLIENT_SECRET=your-slack-client-secret
+  ```
+- **When needed**: Before Phase 1.
+
+#### Step 6: Install Slack App to Workspace
+- In your Slack app dashboard → "Install App" → "Install to Workspace"
+- Authorize the requested permissions
+- Note down the **Bot User OAuth Token** (`xoxb-...`)
+- This bot token gets stored in the `workspaces` table during OAuth callback
+- **When needed**: Before Phase 1. The sync function uses this token to call Slack APIs.
+
+#### Phase 2 Prerequisite: Model Gateway Setup
+- In InsForge dashboard, configure the **Model Gateway** (enable access to an embedding model like `text-embedding-3-small`)
+- Add to Edge Function secrets:
+  ```
+  MODEL_GATEWAY_URL=your-model-gateway-endpoint
+  MODEL_GATEWAY_KEY=your-model-gateway-key
+  ```
+- **When needed**: Before Phase 2 only. Phase 1 doesn't use AI.
+
+---
+
 ### Phase 1: "Plumbing" — Auth + Sync + Basic Feed
-Get data flowing end-to-end. No AI yet.
+Get data flowing end-to-end. No AI yet. **Requires Phase 0 complete.**
 
 1. Scaffold Vite + React + Tailwind project in `web/`
 2. Set up root `package.json` with npm workspaces
@@ -269,29 +338,6 @@ The core value prop.
 - Daily digest Edge Function
 
 ---
-
-## Environment Variables
-
-**Frontend (`.env`)**:
-- `VITE_INSFORGE_URL` — InsForge project URL
-- `VITE_INSFORGE_ANON_KEY` — Public anon key
-- `VITE_SLACK_CLIENT_ID` — Slack app client ID
-
-**Edge Functions (InsForge secrets)**:
-- `INSFORGE_SERVICE_ROLE_KEY`
-- `SLACK_CLIENT_ID`
-- `SLACK_CLIENT_SECRET`
-- `MODEL_GATEWAY_URL`
-- `MODEL_GATEWAY_KEY`
-
----
-
-## Slack App Configuration
-
-Create a Slack app at https://api.slack.com/apps with:
-- **OAuth scopes (Bot)**: `channels:read`, `channels:history`, `users:read`, `reactions:read`, `team:read`
-- **OAuth scopes (User)**: `channels:read`, `channels:history`
-- **Redirect URL**: `{INSFORGE_URL}/functions/v1/slack-oauth-callback`
 
 ---
 
